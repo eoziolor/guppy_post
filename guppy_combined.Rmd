@@ -1,0 +1,2261 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+# Guppy omics start
+
+### Downloading the data from Novogene.
+
+```{bash}
+srun -t 24:00:00 -n 8 --mem 60000 --pty /bin/bash
+mkdir guppy
+cd guppy
+mkdir raw
+cd raw
+wget -r --user="P202SC18122141-01_20181210_AegNaW" --password="lGlLQf" ftp://hwftp.novogene.com/
+```
+
+### Downloading genome for _Poecilia reticulata_ from NCBI.
+
+```{bash}
+cd ~/guppy/data
+mkdir genome
+cd genome
+wget ftp://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/633/615/GCF_000633615.1_Guppy_female_1.0_MT/GCF_000633615.1_Guppy_female_1.0_MT_genomic.fna.gz
+```
+
+### Downloading the annotation of that genome.
+
+```{bash}
+wget ftp://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/000/633/615/GCF_000633615.1_Guppy_female_1.0_MT/GCF_000633615.1_Guppy_female_1.0_MT_genomic.gff.gz
+```
+
+### Renaming for ease.
+
+```{bash}
+mv GCF_000633615.1_Guppy_female_1.0_MT_genomic.fna.gz preticulata.fna.gz
+mv GCF_000633615.1_Guppy_female_1.0_MT_genomic.gff.gz preticulata.gff.gz
+```
+
+### Indexing genomes
+```{bash}
+zcat preticulata.fna.gz > preticulata.fna
+bwa index preticulata.fna
+samtools faidx preticulata.fna
+```
+
+## Converting sample list to unix
+```{bash}
+dos2unix index.txt
+```
+
+## Converting names of files with soft link
+
+```{bash}
+#!/bin/bash/
+dirs=/home/eoziolor/guppy/data/raw/hwftp.novogene.com/C202SC18122141/raw_data/AWCSU*
+my_list=/home/eoziolor/guppy/data/list/index.txt
+my_renamed=/home/eoziolor/guppy/data/raw/renamed
+
+for folder in $dirs
+do cd $folder
+for file in $(ls AWCSU*)
+	do
+	match=$(echo $file | sed -e "s/AWCSU0[0-9]*_//g" | sed -e "s/_H.*//g")
+	new=$(cat $my_list | grep "$match" | awk '{print $2}')
+	end=$(echo $file | sed 's/.*\(.......\)/\1/')
+	ln -s $folder/$file $my_renamed/$new\_$end
+	done
+done
+```
+
+## Checking on empty files
+
+* We included the empty files as a double check for sequencing success
+
+```{bash}
+dir=/home/eoziolor/guppy/data/raw/renamed
+cd $dir
+rm ../sizes.txt
+touch ../sizes.txt
+
+for file in $(ls *_b_*)
+do
+	stat -Lc %s $file >> ../sizes.txt
+done
+```
+
+* And for the true files
+
+```{bash}
+dir=/home/eoziolor/guppy/data/raw/renamed
+cd $dir
+echo "Real samples" >> ../sizes.txt
+
+for file in $(ls -I "*_b_*")
+do
+	stat -Lc %s $file >> ../sizes.txt
+done
+```
+
+* it seems like none of the empty *_b_* wells has any sample in it. We can remove the soft links to them and proceed.
+
+```{bash}
+dir=/home/eoziolor/guppy/data/raw/renamed
+cd $dir
+rm *_b_*
+```
+
+# QC
+## Running FastQC on samples
+
+```{bash}
+#!/bin/bash
+
+#SBATCH -J gp_fastqc
+#SBATCH --array=1-384
+#SBATCH -e gp_fastqc%A-%a.o
+#SBATCH -o gp_fastqc%A-%a.o
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH -t 03:00:00
+#SBATCH --mem=8000
+#SBATCH --no-requeue
+#SBASTCH -p med
+
+module load bio3
+fastqc --version
+
+#folder
+my_dir=/home/eoziolor/guppy/data/raw/renamed
+my_out=/home/eoziolor/guppy/data/fastqc/
+cd $my_dir
+
+if (($SLURM_ARRAY_TASK_ID < 10))
+then
+	num=00$(echo $SLURM_ARRAY_TASK_ID)
+elif (($SLURM_ARRAY_TASK_ID < 100))
+then
+	num=0$(echo $SLURM_ARRAY_TASK_ID)
+else
+	num=$(echo $SLURM_ARRAY_TASK_ID)
+fi
+
+echo $num
+
+#code
+cd $my_dir
+fastqc AWCSU*_$num\_*\.fq.gz \
+-o $my_out
+```
+
+## Running MultiQC
+
+```{bash}
+module load bio3
+conda create --name guppy python=2.7
+source activate guppy
+conda install -c bioconda multiqc
+
+# run in folder with fastqc files
+
+multiqc .
+```
+
+## Manual QC
+
+* Several samples show very low coverage. I want to remove the ones below a certain threshold.
+
+
+```{bash}
+dir=/home/eoziolor/guppy/data/raw/renamed
+cd $dir
+touch ../fail_name.txt
+touch ../fail_size.txt
+
+for file in $(ls)
+do
+	echo $file >> ../fail_name.txt
+done
+
+for file in $(ls)
+do
+	stat -Lc %s $file >> ../fail_size.txt
+done
+
+paste ../fail_name.txt ../fail_size.txt > ../fails.txt
+rm ../fail_name.txt ../fail_size.txt
+```
+
+* Choosing to remove files with less than 100 Mb data
+
+```{bash}
+cat ../fails.txt | awk '{OFS="\t"}{if($2<100000000){print $1}}' | xargs rm
+```
+* Checking that those were removed
+
+```{bash}
+dir=/home/eoziolor/guppy/data/raw/renamed
+cd $dir
+touch ../fail_name.txt
+touch ../fail_size.txt
+
+for file in $(ls)
+do
+	echo $file >> ../fail_name.txt
+done
+
+for file in $(ls)
+do
+	stat -Lc %s $file >> ../fail_size.txt
+done
+
+paste ../fail_name.txt ../fail_size.txt > ../fails_post.txt
+rm ../fail_name.txt ../fail_size.txt
+```
+
+## Trimming
+
+* Using cutadapt and will do fastqc afterwards.
+* Won't use trimmomatic so that I can use a pipeline with cutadapt after and not have to keep the trimmer reads (if everything went well)
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J trim
+#SBATCH --array=1-384
+#SBATCH -e trim%A-%a.o
+#SBATCH -o trim%A-%a.o
+#SBATCH -N 1
+#SBATCH -n 8
+#SBATCH -t 01-00:00
+#SBATCH --mem=8000
+
+module load bio3
+
+#Assigning number to be able to get into each folder separately
+
+if (($SLURM_ARRAY_TASK_ID < 10))
+then
+	num=00$(echo $SLURM_ARRAY_TASK_ID)
+elif (($SLURM_ARRAY_TASK_ID < 100))
+then
+	num=0$(echo $SLURM_ARRAY_TASK_ID)
+else
+	num=$(echo $SLURM_ARRAY_TASK_ID)
+fi
+
+echo $num
+
+#Directory and file assignment for each file and program
+my_dir=/home/eoziolor/guppy/data/raw/renamed
+fq1=$my_dir/AWCSU*$num*1.fq.gz
+fq2=$my_dir/AWCSU*$num*2.fq.gz
+my_bwa=/home/eoziolor/program/bwa-0.7.17/bwa
+my_sbl=/home/eoziolor/program/samblaster/samblaster
+my_sam=/home/eoziolor/program/samtools-1.9/samtools
+my_out=/home/eoziolor/guppy/data/trim/
+my_gen=/home/eoziolor/guppy/data/genome/preticulata.fna
+
+
+#Code
+paste <(zcat $fq1 | paste - - - -) \
+      <(zcat $fq2 | paste - - - -) |\
+tr '\t' '\n' |\
+cutadapt -j 8 --interleaved -a CTGTCTCTTATA -A CTGTCTCTTATA -u 10 -U 10 -q 30 --trim-n --minimum-length 36 - | gzip > $my_out/AWCSU.$num.fq.gz
+```
+
+## FastQC on trimmed samples
+
+```{bash}
+#!/bin/bash
+
+#SBATCH -J post_fastqc
+#SBATCH --array=1-384
+#SBATCH -e post_fastqc%A-%a.o
+#SBATCH -o post_fastqc%A-%a.o
+#SBATCH -N 1
+#SBATCH -n 8
+#SBATCH -t 1-00:00
+#SBATCH --mem=16000
+#SBATCH --no-requeue
+#SBASTCH -p med
+
+module load bio3
+fastqc --version
+
+#folder
+my_dir=/home/eoziolor/guppy/data/trim
+my_out=/home/eoziolor/guppy/data/fastqc/post
+cd $my_dir
+
+if (($SLURM_ARRAY_TASK_ID < 10))
+then
+	num=00$(echo $SLURM_ARRAY_TASK_ID)
+elif (($SLURM_ARRAY_TASK_ID < 100))
+then
+	num=0$(echo $SLURM_ARRAY_TASK_ID)
+else
+	num=$(echo $SLURM_ARRAY_TASK_ID)
+fi
+
+echo $num
+
+#code
+cd $my_dir
+fastqc -t 8 AWCSU*\.$num\.fq.gz \
+-o $my_out
+```
+
+## MultiQC on trimmed samples
+
+```{bash}
+cd ~/guppy/data/fastqc/post/
+module load bio3
+source activate guppy
+multiqc .
+cp multiqc_report.html ~/public_html
+```
+
+# Mapping
+
+* Creating a sample pop list with column 1 the sample number and column 2 the population beloning
+
+```{bash}
+scp -P 2022 ~/Documents/UCD/Projects/guppy_omics/sample_sheets/pop_assignment.csv farm:~/guppy/data/list/
+cd ~/guppy/data/list/
+
+dos2unix pop_assignment.csv
+
+printf "%03d\n" $(cat pop_assignment.csv | tr "," "\t" | awk '{print $1}') > zeros_list.txt
+
+cat pop_assignment.csv | tr ',' '\t' | awk '{OFS=""}{s="\t"}{v="_"}{print $2,v,$3}' > pops.txt
+
+paste zeros_list.txt pops.txt > zeros_pops.txt
+```
+
+* Mapping to the reticulata genome
+
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J guppy_trimalign
+#SBATCH --array=1-384
+#SBATCH -e guppy_trimalign%A-%a.o
+#SBATCH -o guppy_trimalign%A-%a.o
+#SBATCH -N 1
+#SBATCH -n 8
+#SBATCH -t 01-00:00
+#SBATCH --mem=16000
+
+module load bio3
+
+#Assigning number to be able to get into each folder separately
+
+if (($SLURM_ARRAY_TASK_ID < 10))
+then
+	num=00$(echo $SLURM_ARRAY_TASK_ID)
+elif (($SLURM_ARRAY_TASK_ID < 100))
+then
+	num=0$(echo $SLURM_ARRAY_TASK_ID)
+else
+	num=$(echo $SLURM_ARRAY_TASK_ID)
+fi
+
+echo $num
+
+#Assigning new sample numbers with same amount of digits
+if (($SLURM_ARRAY_TASK_ID < 10))
+then
+        sample=00$(echo $SLURM_ARRAY_TASK_ID)
+elif (($SLURM_ARRAY_TASK_ID < 100))
+then
+        sample=0$(echo $SLURM_ARRAY_TASK_ID)
+else 
+        sample=$(echo $SLURM_ARRAY_TASK_ID)
+fi
+
+
+#Directory and file assignment for each file and program
+my_dir=/home/eoziolor/guppy/data/raw/renamed
+fq1=$my_dir/AWCSU*\_$num\_1.fq.gz
+fq2=$my_dir/AWCSU*\_$num\_2.fq.gz
+my_bwa=/home/eoziolor/program/bwa-0.7.17/bwa
+my_sbl=/home/eoziolor/program/samblaster/samblaster
+my_sam=/home/eoziolor/program/samtools-1.9/samtools
+my_out=/home/eoziolor/guppy/data/align/
+my_gen=/home/eoziolor/guppy/data/genome/preticulata.fna
+my_list=/home/eoziolor/guppy/data/list/zeros_pops.txt
+
+#others
+pop=$(cat $my_list | grep $sample | cut -f 2)
+rg=$(echo \@RG\\tID:$sample\\tPL:Illumina\\tPU:x\\tLB:combined\\tSM:$sample.$pop)
+outroot=CSU\_$sample\_$pop
+
+#Code
+paste <(zcat $fq1 | paste - - - -) \
+      <(zcat $fq2 | paste - - - -) |\
+tr '\t' '\n' |\
+cutadapt -j 8 --interleaved -a CTGTCTCTTATA -A CTGTCTCTTATA -u 10 -U 10 -q 30 --trim-n --minimum-length 36 - |\
+$my_bwa mem $my_gen -p -R $rg -t 2 - |\
+$my_sam view -S -h -u - | \
+$my_sam sort -T $my_out/$outroot > $my_out/$outroot\.bam
+```
+
+* Empty samples were produced because of array parameters. Removing those manually.
+
+```{bash}
+cd ~/guppy/data/align/
+rm *_.bam
+```
+
+* One issue - created bam files for failed samples! - Let's remove those
+
+```{bash}
+ls -lS *CSU* | tail -n 27 | awk '{print $9}' > fake_bams.txt
+
+cat fake_bams.txt | xargs rm
+```
+
+## Basic mapping statistics
+
+* Using samtools flagstat to look at alignment success
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J flagstat
+#SBATCH -e flagstat-%j.o
+#SBATCH -o flagstat-%j.o
+#SBATCH -N 1
+#SBATCH -n 16
+#SBATCH -t 01-00:00
+#SBATCH --mem=60000
+#SBATCH -p high
+
+#files
+my_dir=/home/eoziolor/guppy/data/align
+my_sam=/home/eoziolor/program/samtools-1.9/bin/samtools
+my_out=/home/eoziolor/guppy/data/align/stats.txt
+
+touch $my_out
+
+#code
+for file in $my_dir/CSU*.bam; do
+	echo $file >> $my_out
+	$my_sam flagstat $file >> $my_out
+done
+```
+
+### Mapping success rate and coverage
+
+```{bash}
+#in folder with bam files
+cat stats.txt | grep "mapped (" | awk '{OFS=" "}{print $1}' > mapped_reads.txt
+cat stats.txt | grep home | sed 's/\/home\/eoziolor\/guppy\/data\/align\///g' | sed 's/\.bam//g' | tr '_' '\t' | awk '{OFS="\t"}{print $2,$3,$4}' | paste - mapped_reads.txt > mapped_reads_ind.txt
+```
+
+### Exploring mapped reads in R
+
+```{r}
+library(ggplot2)
+mapped<-read.table("~/guppy/data/mapped_reads_ind.txt",header=F,sep='\t')
+mapped<-na.omit(mapped)
+
+#calculating coverage
+mapped[,5]<-mapped[,4]*140/830000000
+
+#histogram for overall coverage
+hist(mapped[,5],breaks=100, col="black")
+
+#converting ind to numeric
+mapped[,1]<-as.numeric(mapped[,1])
+
+#creating a vector of plate #
+for(i in 1:20){
+  for(j in 1:(dim(mapped)[1])){
+    if(mapped[j,1]<=i*64&&mapped[j,1]>(i-1)*64){
+    mapped[j,6]<-i
+  }
+  }
+}
+
+#naming columns
+colnames(mapped)<-c("ind","pop","sal","reads","cov","plate")
+
+ggplot(mapped,
+       aes(x=pop,y=cov,color=pop))+
+  geom_violin(color="black")+
+  geom_jitter()+
+  theme_classic()
+
+ggplot(mapped,
+       aes(x=as.factor(plate),y=cov,color=plate))+
+  geom_violin(color="black")+
+  geom_jitter()+
+  theme_classic()
+
+ggplot(mapped,
+       aes(x=as.factor(sal),y=cov,color=sal))+
+  geom_violin(color="black")+
+  geom_jitter()+
+  theme_classic()
+
+```
+
+## File with all bam locations
+
+```{bash}
+cd ~/guppy/data/align/
+ls -1 CSU* | sed 's/^/\/home\/eoziolor\/guppy\/data\/align\//g' > ~/guppy/data/list/bam_list.txt
+```
+
+## Merging all files into one bam
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J mergebam
+#SBATCH -e mergebam-%j.o
+#SBATCH -o mergebam-%j.o
+#SBATCH -N 1
+#SBATCH -n 16
+#SBATCH -t 02-00:00
+#SBATCH --mem=60000
+#SBATCH -p high
+
+#files
+my_bam=/home/eoziolor/program/bamtools/build/src/toolkit/bamtools
+my_merge=/home/eoziolor/guppy/data/align/allmerge.bam
+my_list=/home/eoziolor/guppy/data/list/bam_list.txt
+
+#code
+$my_bam merge -list $my_list -out $my_merge
+```
+
+### Indexing merged_stools.bam file
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J bam_index
+#SBATCH -e bam_index-%j.o
+#SBATCH -o bam_index%j.o
+#SBATCH -N 1
+#SBATCH -n 16
+#SBATCH -t 01-00:00
+#SBATCH --mem=60000
+#SBATCH -p high
+
+my_stools=/home/eoziolor/program/samtools-1.9/samtools 
+my_bam=/home/eoziolor/guppy/data/align/allmerge_stools.bam
+
+$my_stools index -@16 $my_bam
+```
+
+### Indexing merged .bam file
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J bam_index
+#SBATCH -e bam_index-%j.o
+#SBATCH -o bam_index%j.o
+#SBATCH -N 1
+#SBATCH -n 16
+#SBATCH -t 01-00:00
+#SBATCH --mem=60000
+#SBATCH -p high
+
+my_stools=/home/eoziolor/program/samtools-1.9/samtools 
+my_bam=/home/eoziolor/guppy/data/align/allmerge_stools.bam
+
+$my_stools index -@16 $my_bam
+```
+
+## Indexing individual bam files
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J bam_index
+#SBATCH --array=1-383
+#SBATCH -e bam_index-%A-%a.o
+#SBATCH -o bam_index-%A-%a.o
+#SBATCH -N 1
+#SBATCH -n 16
+#SBATCH -t 01-00:00
+#SBATCH --mem=60000
+#SBATCH -p high
+
+my_stools=/home/eoziolor/program/samtools-1.9/samtools 
+my_list=/home/eoziolor/guppy/data/list/bam_list.txt
+
+if (($SLURM_ARRAY_TASK_ID < 10))
+then
+	num=00$(echo $SLURM_ARRAY_TASK_ID)
+elif (($SLURM_ARRAY_TASK_ID < 100))
+then
+	num=0$(echo $SLURM_ARRAY_TASK_ID)
+else
+	num=$(echo $SLURM_ARRAY_TASK_ID)
+fi
+
+my_sample=$(cat $my_list | grep $num)
+
+echo $num
+echo $my_sample
+
+$my_stools index -@ 16 $my_sample
+```
+
+# Depth Threshold determination
+## Depth per base on merged bam
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J bamdepth
+#SBATCH -e bamdepth-%j.o
+#SBATCH -o bamdepth-%j.o
+#SBATCH -N 1
+#SBATCH -n 23
+#SBATCH -t 06-00:00
+#SBATCH --mem=60000
+#SBATCH -p med
+#SBATCH --no-requeue
+
+module load bio3
+
+#files
+my_list=/home/eoziolor/guppy/data/list/bam_list.txt
+my_stools=/home/eoziolor/program/samtools-1.9/bin/samtools
+my_out=/home/eoziolor/guppy/data/depth/coverage_allbases.txt.gz
+my_dir=/home/eoziolor/guppy/data/align/
+
+#code
+$my_stools merge - $my_dir/CSU*.bam | $my_stools depth -d 10000 - | gzip > $my_out
+```
+
+## Grabbing 10Mb at random
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J rand10Mb
+#SBATCH -e rand10Mb-%j.o
+#SBATCH -o rand10Mb-%j.o
+#SBATCH -N 1
+#SBATCH -n 23
+#SBATCH -t 01-00:00
+#SBATCH --mem=60000
+#SBATCH -p high
+
+module load bio3
+
+#files
+dir=/home/eoziolor/guppy/data/depth
+
+zcat $dir/coverage_allbases.txt.gz | \
+sort -R | \
+head -n 10000000 | \
+gzip > $dir/cov_10Mbrand.txt.gz
+```
+
+### Observing coverage in R
+
+```{r}
+cov<-read.table("~/guppy/data/cov_10Mbrand.txt.gz",header=F)
+names(cov)<-c("chrom","pos","cov")
+cov$cov<-as.numeric(cov$cov)
+hist(cov$cov,breaks=1000)
+
+subw<-cov$cov<3000
+hist(cov[subw,"cov"],breaks=1000)
+
+summary(cov$cov)
+summary(cov[subw,"cov"])
+```
+
+## High coverage regions
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J highcov
+#SBATCH -e highcov-%j.o
+#SBATCH -o highcov-%j.o
+#SBATCH -N 1
+#SBATCH -n 8
+#SBATCH -t 03-00:00
+#SBATCH --mem=60000
+#SBATCH -p high
+
+module load bio3
+source ~/.bashrc
+
+#files
+my_cov=/home/eoziolor/phpopg/data/depth/coverage_allbases.txt.gz
+my_out=/home/eoziolor/phpopg/data/depth/hicov.bed
+
+zcat $my_cov | \
+awk '{OFS="\t"}{s=$2-1}{print $1,s,$2,$3}' | \
+awk '{OFS="\t"}{if($4>1500){print}}' | \
+bedtools merge -i - -d 10 -c 4 -o count > $my_out
+```
+
+#Variant calling SNPs
+
+## Freebayes on NC - large autosomes (n=23)
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J bigbayes
+#SBATCH --array=1-2300
+#SBATCH -e bigbayes%A-%a.o
+#SBATCH -o bigbayes%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+cd /home/eoziolor/guppy/data/varcall/scaffold/
+
+#files
+genome=/home/eoziolor/guppy/data/genome/preticulata.fna
+my_fai=/home/eoziolor/guppy/data/genome/preticulata.fna.fai
+mergebam=/home/eoziolor/guppy/data/align/allmerge_stools.bam
+popsfile=/home/eoziolor/guppy/data/list/zeros_pops.txt
+hicov=/home/eoziolor/guppy/data/depth/hicov.bed
+reg_file=/home/eoziolor/guppy/data/genome/preticulata.fna.genome
+
+#programs
+my_freebayes=/home/eoziolor/program/freebayes/bin/freebayes
+my_samtools=/home/eoziolor/program/samtools-1.9/samtools
+my_bgz=/home/eoziolor/program/htslib/bgzip
+my_bedtools=/home/eoziolor/program/bedtools2/bin/bedtools
+
+#selecting scaffold to investigate from the genome file
+
+crap=$(echo $SLURM_ARRAY_TASK_ID)
+line=$(echo $(((crap+99)/100)))
+scaf=$(sed "$line q;d" $reg_file | cut -f1)
+end=$(sed "$line q;d" $reg_file | cut -f2)
+
+#chunking a region to investigate
+
+short=$((end/100))
+iter=$((crap-((line-1)*100)))
+chunk=$((short*iter))
+if [ "$iter" -lt "100" ]; then
+	portion=$((1+chunk-short))-$chunk
+else
+	portion=$((1+chunk-short))-$end
+fi
+region=$scaf:$portion
+
+echo "This is array number" $crap 
+echo "I am picking line" $line "from genome file"
+echo "It is iteration" $iter "for scaffold" $scaf
+echo "The chunk size I am picking is" $short "bases long and this is ending at" $chunk
+echo "The region this defines is" $portion "from scaffold with length" $end
+echo "\n\n"
+
+
+#directories and files
+
+outdir=/home/eoziolor/guppy/data/varcall/scaffold
+outfile=$scaf\_$iter\.vcf.bgz
+
+$my_samtools view -q 30 -f 2 -h -b  $mergebam $region | \
+$my_bedtools intersect -v -a stdin -b $hicov | \
+$my_freebayes -f $genome --populations $popsfile --stdin | \
+$my_bgz > $outdir/$outfile
+
+echo "The file created is" $outfile
+echo "I place it in directory" $outdir
+```
+
+## Merging vcf files
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J merge_vcf
+#SBATCH -e merge_vcf-%j.o
+#SBATCH -o merge_vcf-%j.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p high
+#SBATCH --no-requeue
+
+
+my_dir=/home/eoziolor/guppy/data/varcall
+my_bgz=/home/eoziolor/program/htslib/bgzip
+
+cd $my_dir/scaffold
+
+zcat NC_024331.1_1.vcf.bgz | grep "#" | $my_bgz > $my_dir/ppicta_merged.vcf.bgz
+
+for i in $(ls -1 | sort --version-sort | head -n 1000); do
+zcat $i | grep -v "#" | $my_bgz >> $my_dir/ppicta_merged.vcf.bgz
+done
+```
+
+## Filtering VCF merge
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J filter_vcf
+#SBATCH -e filter_vcf-%j.o
+#SBATCH -o filter_vcf-%j.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p high
+#SBATCH --no-requeue
+
+my_vtools=/home/eoziolor/program/vcftools/bin/vcftools
+my_prevcf=/home/eoziolor/guppy/data/varcall/ppicta_merged.vcf.bgz
+my_dir=/home/eoziolor/guppy/data/varcall/
+my_out=filtered_ppicta
+my_bgz=/home/eoziolor/program/htslib/bgzip
+
+cd $my_dir
+
+$my_vtools \
+--gzvcf $my_prevcf \
+--stdout \
+--maf 0.01 \
+--min-alleles 2 \
+--max-alleles 2 \
+--minQ 30 \
+--max-missing 0.5 |\
+$my_bgz > $my_dir/$my_out.vcf.bgz
+```
+
+## Sorting VCF
+
+```{bash}
+my_bgz=/home/eoziolor/program/htslib/bgzip
+
+zcat sample.vcf.bgz | head -n 2829 | $my_bgz > sorted_sample.vcf.bgz
+zcat sample.vcf.bgz | grep -v ^"#"| sort -k1,1 -k4,4n | $my_bgz >> sorted_sample.vcf.bgz
+
+```
+
+# WC Fst
+
+## Running Weir and Cockerham Fst
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J wcfst
+#SBATCH --array=1-55
+#SBATCH -e wcfst%A-%a.o
+#SBATCH -o wcfst%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+outdir=/home/eoziolor/guppy/data/wcfst
+popfile=/home/eoziolor/guppy/data/list/zeros_pop.txt
+my_wcfst=/home/eoziolor/program/vcflib/bin/wcFst
+my_pfst=/home/eoziolor/program/vcflib/bin/pFst
+my_vcf=/home/eoziolor/guppy/data/varcall/filtered_ppicta.vcf.bgz
+my_bgzip=/home/eoziolor/program/htslib/bgzip
+
+pops=CAP_F\ CAP_H\ CAP_L\ CAP_S\ CAR_F\ CAR_H\ CAR_L\ CAR_S\ CUN_F\ CUN_L\ CUN_S
+
+pair=$(for i in {1..10}
+do
+	ii=$(expr $i + 1)
+	for j in $(seq $ii 11)
+	do echo $pops | cut -f $i,$j -d ' '
+  done
+done | \
+sed -n "$(echo $SLURM_ARRAY_TASK_ID)p")
+
+echo $SLURM_ARRAY_TASK_ID
+
+pop1=$(echo $pair | cut -f 1 -d ' ')
+pop2=$(echo $pair | cut -f 2 -d ' ')
+
+target=$(grep -n $pop1 $popfile | cut -f 1 -d ":" | awk '{s=$1-1}{print s}' | tr '\n' ',' | \
+sed 's/,$//')
+
+background=$(grep -n $pop2 $popfile | cut -f 1 -d ":" | awk '{s=$1-1}{print s}' | tr '\n' ',' | \
+sed 's/,$//')
+
+outfile1=$pop1.$pop2.wcfst.bgz
+outfile2=$pop1.$pop2.pfst.bgz
+
+out1=$outdir/$outfile1
+out2=$outdir/$outfile2
+
+echo $out1
+echo $out2
+
+echo $target
+echo $background
+echo $outfile1
+echo $outfile2
+
+$my_wcfst \
+--target $target \
+--background $background \
+--file $my_vcf \
+--type GL | \
+$my_bgzip>$out1
+
+$my_pfst \
+--target $target \
+--background $background \
+--file $my_vcf \
+--type GL | \
+$my_bgzip>$out2
+```
+
+## Fst to PBS
+
+### TO BE DONE:Converting to windows
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J window_fst
+#SBATCH --array=1-55
+#SBATCH -e window_fst%A-%a.o
+#SBATCH -o window_fst%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+#program/file
+fst_files=/home/eoziolor/guppy/data/wcfst
+my_bedtools=/home/eoziolor/program/bedtools2/bin/bedtools
+my_genome=/home/eoziolor/guppy/data/genome/preticulata.fna.genome
+my_window=/home/eoziolor/guppy/data/window/50kb.10kb.bed
+
+for file in /data/oziolore/fhet/data/fst2/*wcfst.bgz
+do
+	outfile=$(echo $file | sed 's/wcfst.bgz/fst.1kb.bed/')
+
+	zcat $file | \
+	awk '{OFS="\t"}{s=$2-1}{print $1,s,$2,$5}' | \
+	$my_bedtools map \
+	-a $my_window \
+	-b stdin \
+	-g $my_genome \
+	-c 4,4 \
+	-o mean,count> $outfile
+done
+```
+
+### TO BE DONE: Downloading the data
+```{bash}
+scp -P 2022 farm:/home/eoziolor/guppy/data/wcfst/*.bed ~/guppy/data/fst/
+```
+
+### TO BE DONE: Converting Fst to PBS
+```{r}
+library("RColorBrewer")
+library("lattice")
+library("gplots")
+#Loaidng list of fst files into a list object ----
+fs <- list.files("~/guppy/data/fst/", "*fst.1kb.bed",full.names=TRUE)
+
+fst <- list()
+
+for (i in 1:55){
+  fst[[i]] <- read.table(fs[i],stringsAsFactors=FALSE)
+  fst[[i]][,4] <- as.numeric(fst[[i]][,4])
+}
+
+nfs <- gsub(".*\\/","",fs)
+nfs <- gsub(".fst.*","",nfs)
+names(fst)<-nfs
+
+#loading the pbs function----
+pbs <- function(t1,t2,c12){
+  
+  t1 <- -log(1-t1)
+  t2 <- -log(1-t2)
+  c12 <- -log(1-c12)
+  
+  stat <- (t1 + t2 - c12)/2
+  return(stat)
+}
+
+#selecting sites that ahave a minimum representation of 200 snps per region----
+nsnps <-fst[[1]][,5]
+
+for (i in 2:55){
+  
+  nsnps <- nsnps + fst[[i]][,5]
+}
+
+nsnps <- nsnps/55
+
+subw <- nsnps > 200
+
+#calculating FST for all
+
+fstl<-c()
+for(i in 1:55){
+  fstl[i]<-mean(fst[[i]][subw,4],na.rm=TRUE)
+}
+
+names(fstl)<-names(fst)
+
+pops<-c("CAP_F","CAP_H","CAP_L","CAP_S","CAR_F","CAR_H","CAR_L","CAR_S","CUN_F","CUN_L","CUN_S")
+
+fsth<-matrix(nrow = 11,ncol=11) #creating matrix to hold fst data
+rownames(fsth)<- pops
+colnames(fsth)<- pops
+
+for(i in pops){
+  for(j in pops){
+    if(i==j){next()}
+    fsth[i,j]<-fstl[paste(sort(unique(c(i,j))),collapse=".")]
+  }
+}
+
+levelplot(fsth,aspect="iso",col.regions=brewer.pal(9,"YlOrRd"),scale=list(x=list(rot=45)),cuts=8)
+
+#Doing pbs on all pops----
+
+pbs_target <- c("CAP_F","CAR_F","CUN_F")
+pbs_backgr <- c("CAP_S","CAR_S","CUN_S")
+
+for(i in 1:3){
+  for(j in c(i,i+1)){
+    if(j==4) j=1 else j=j
+    if(j==3) k=1 else k=j+1
+    combo<-c(paste(c(pbs_target[i],pbs_backgr[j]),collapse="."),
+             paste(c(pbs_target[i],pbs_backgr[k]),collapse="."),
+             paste(c(pbs_backgr[j],pbs_backgr[k]),collapse="."))
+    print(combo)
+  }
+}
+
+BBpbs <- pbs(fst[["BB.GB"]][,4],fst[["BB.SP"]][,4],fst[["GB.SP"]][,4])
+
+VBpbs <- pbs(fst[["VB.GB"]][,4],fst[["VB.SP"]][,4],fst[["GB.SP"]][,4])
+
+PBpbs <- pbs(fst[["PB.GB"]][,4],fst[["PB.SP"]][,4],fst[["GB.SP"]][,4])
+
+SJpbs <- pbs(fst[["SJ.GB"]][,4],fst[["SJ.SP"]][,4],fst[["GB.SP"]][,4])
+
+BNPpbs <- pbs(fst[["BNP.GB"]][,4],fst[["BNP.SP"]][,4],fst[["GB.SP"]][,4])
+
+
+Allpbs <- cbind(
+  fst[[1]][,1:3],
+  BB = BBpbs,
+  VB = VBpbs,
+  PB = PBpbs,
+  SJ = SJpbs,
+  BNP = BNPpbs,
+  keep = as.numeric(subw))
+
+write.table(Allpbs,
+            file="~/analysis/data/fst/allpbs1kb",
+            sep = "\t", 
+            quote = FALSE,
+            row.names = FALSE,
+            col.names = FALSE)
+
+
+plot(BBpbs[subw],pch=20,cex=.5, col=factor(Allpbs[,1]))
+quantile(BBpbs[subw],probs=.99,na.rm=TRUE)
+abline(h=.1804205)
+
+
+####Gene comparisons
+
+pbs<-read.table("~/analysis/data/fst/allpbs1kb",header=FALSE)
+pbsname<-c("Scaf","start","end","BBpbs","VBpbs","PBpbs","SJpbs","BNPpbs","keep")
+colnames(pbs)<-pbsname
+
+col<-c()
+for (i in 1:5){
+  col[i]<-quantile(pbs[,i+3],prob=.99,na.rm=TRUE)
+}
+
+################################################AHR2a
+
+###finding neutral regions to do admixture on----
+
+pbs<-read.table("~/analysis/data/fst/allpbs5kb",header=FALSE)
+pbsname<-c("Scaf","start","end","BBpbs","VBpbs","PBpbs","SJpbs","BNPpbs","keep")
+colnames(pbs)<-pbsname
+
+npbs<-c()
+for (i in 1:1026857){
+  npbs[i]<-rowSums((pbs[i,4:8])/5)
+}
+subw2<-npbs<0.02
+subw3<-subw+subw2
+subw4<-subw3>1
+
+plot(pbsalt[subw4,4])
+
+pbsalt<- cbind(
+  fst[[1]][,1:3],
+  BB = BBpbs,
+  VB = VBpbs,
+  PB = PBpbs,
+  SJ = SJpbs,
+  BNP = BNPpbs,
+  keep=as.numeric(subw4))
+
+
+write.table(pbsalt,"~/share/fst/pbsneut",
+            quote=FALSE,row.names = FALSE,col.names = FALSE,sep='\t')
+table(pbsalt[,9])
+```
+
+# MDS
+
+```{bash}
+# Using first 5 000 snps to createe a subsample
+zcat filtered_ppicta.vcf.bgz | head -n 8000 | $my_bgz > subsample.vcf.bgz
+
+#Downloading
+scp -P 2022 farm:/home/eoziolor/guppy/data/varcall/subsample.vcf.bgz ~/guppy/data/
+
+# Haploidizing
+zcat < ~/guppy/data/subsample.vcf.bgz | ~/fgfh_post/scripts/haplo/haploidize_gran_mine.r | gzip > ~/guppy/data/subsample_haplo.vcf.gz
+
+# Creating sexscore
+cd ~/guppy/data/align/
+ls -1 C*.bam | sed 's/CSU\_//g' | sed 's/\.bam//g' | awk '{OFS="\t"}{v="RAND"}{print $1,v}' > ../list/sexscore.txt
+
+#Downloading
+scp -P 2022 farm:/home/eoziolor/guppy/data/list/sexscore.txt ~/guppy/data/
+
+```
+
+### Haploidizing function
+* I used a script (based on Noah Reid's script) that haploidizes genotypes based of low coverage data and just pass each file through them. Script below is called haploidize_gran_mine.r
+
+```{r}
+#!/usr/bin/env Rscript
+
+library(stringr)
+library(magrittr)
+
+sam<-function(x){
+      y <- str_split(x,":")[[1]][1] %>% 
+    			 str_split(.,"\\/") %>% 
+    			 unlist() %>% 
+    			 as.numeric() # pull genotypes
+      if(is.na(y)){
+        return(".")
+      } else {
+          z<-str_split(x,":")[[1]][3] %>% 
+             str_split(.,",") %>% 
+             unlist() %>% 
+             as.numeric() # pull allele coverage
+          if(y[1]==y[2]){
+            h<-y[1]
+          } else {
+            if(z[1]>z[2]){
+              h<-y[1]
+            } else {
+              h<-sample(y,size=1)
+            }
+          }
+        return(h)
+      }
+}
+
+f <- file("stdin")
+#f<-file("~/analysis/data/dfst/outliers/zshared.vcf.bgz")
+open(f)
+while(length(line <- readLines(f,n=1)) > 0) {
+  if(grepl("^#",line)){write(line,stdout());next()}
+
+  line <- str_split(line,"\\t") %>% unlist()
+  line[10:297] <- sapply(line[10:297],sam)
+  line <- paste(line,collapse="\t")
+  write(line,stdout())
+  # write(line, stderr())
+  # process line
+}
+```
+
+
+## Plotting haplotypes
+  + starting with resistant only haplotypes (because they finished first)
+```{r}
+#install.packages("Rphylip")
+library(viridis)
+library(dplyr)
+library(magrittr)
+library(Rphylip)
+library(ape)
+library(stringr)
+vcf<-read.table("~/guppy/data/subsample_haplo.vcf.gz",stringsAsFactors = FALSE) #vcf that has been filtered out to only present one allele call per site per individual
+sexscore<-read.table("~/guppy/data/sexscore.txt",header=TRUE)
+cname<-c(seq(1:9),as.character(sexscore[,1])) # colnames for the vcf
+colnames(vcf)<-cname
+
+#toss sites that happen to have more than one allele
+keep<-!grepl(",",vcf[,5]) #none because of the way I've called haplotypes table to check that
+
+gt<-as.matrix(vcf[,10:359])
+class(gt)<-"numeric"
+
+#toss individuals with greater than 90% missing data
+keep<-colMeans(is.na(gt))<0.9
+gt<-gt[,keep]
+
+#population identifiers
+pop<-ifelse(grepl("CAP_F",sexscore[,1]),"CAP_F",
+            ifelse(grepl("CAP_H",sexscore[,1]),"CAP_H",
+                   ifelse(grepl("CAP_L",sexscore[,1]),"CAP_L",
+                          ifelse(grepl("CAP_S",sexscore[,1]),"CAP_S",
+                                 ifelse(grepl("CAR_F",sexscore[,1]),"CAR_F",
+                                        ifelse(grepl("CAR_H",sexscore[,1]),"CAR_H",
+                                               ifelse(grepl("CAR_L",sexscore[,1]),"CAR_L",
+                                                      ifelse(grepl("CAR_S",sexscore[,1]),"CAR_S",
+                                                             ifelse(grepl("CUN_F",sexscore[,1]),"CUN_F",
+                                                                    ifelse(grepl("CUN_L",sexscore[,1]),"CUN_L",
+                                                                           ifelse(grepl("CUN_S",sexscore[,1]),"CUN_S","WRONG")))))))))))
+
+popcol<-ifelse(grepl("CAP_F",sexscore[,1]),"black",
+            ifelse(grepl("CAP_H",sexscore[,1]),"black",
+                   ifelse(grepl("CAP_L",sexscore[,1]),"black",
+                          ifelse(grepl("CAP_S",sexscore[,1]),"black",
+                                 ifelse(grepl("CAR_F",sexscore[,1]),"firebrick2",
+                                        ifelse(grepl("CAR_H",sexscore[,1]),"firebrick2",
+                                               ifelse(grepl("CAR_L",sexscore[,1]),"firebrick2",
+                                                      ifelse(grepl("CAR_S",sexscore[,1]),"firebrick2",
+                                                             ifelse(grepl("CUN_F",sexscore[,1]),"cadetblue3",
+                                                                    ifelse(grepl("CUN_L",sexscore[,1]),"cadetblue3",
+                                                                           ifelse(grepl("CUN_S",sexscore[,1]),"cadetblue3","WRONG")))))))))))
+
+popfill<-ifelse(grepl("CAP_F",sexscore[,1]),"black",
+            ifelse(grepl("CAP_H",sexscore[,1]),"grey60",
+                   ifelse(grepl("CAP_L",sexscore[,1]),"grey30",
+                          ifelse(grepl("CAP_S",sexscore[,1]),"grey90",
+                                 ifelse(grepl("CAR_F",sexscore[,1]),"firebrick4",
+                                        ifelse(grepl("CAR_H",sexscore[,1]),"red",
+                                               ifelse(grepl("CAR_L",sexscore[,1]),"firebrick2",
+                                                      ifelse(grepl("CAR_S",sexscore[,1]),"lightpink",
+                                                             ifelse(grepl("CUN_F",sexscore[,1]),"cadetblue3",
+                                                                    ifelse(grepl("CUN_L",sexscore[,1]),"cadetblue3",
+                                                                           ifelse(grepl("CUN_S",sexscore[,1]),"cyan","WRONG")))))))))))
+
+pop2<-pop[keep]
+popcol2<-popcol[keep]
+popfill2<-popfill[keep]
+
+popname<-c("CAP_F","CAP_H","CAP_L","CAP_S","CAR_F","CAR_H","CAR_L","CAR_S","CUN_F","CUN_L","CUN_S")
+popnamec<-c("black","black","black","black","firebrick1","firebrick1","firebrick1","firebrick1","cadetblue3","cadetblue3","cadetblue3")
+#distance matrix and nj tree
+d <- t(gt) %>% dist()
+#dd<-as.dist(ultrametric(d)) #imputing data for missing values using ultrametric procedure
+mds <- cmdscale(dd)
+tr <- nj(dd)
+
+#plotting tree
+plot(tr,"unrooted",show.tip.label=FALSE)
+tiplabels(pch=20,col=popcol2,bg="white",cex=1.2)
+legend("topright",pch=20,cex=1.2,legend=popname,col=popnamec)
+
+#plotting mds
+par(mfrow=c(1,1),mar=c(3,3,0,0))
+plot(mds,col=popcol2,cex=2,cex.axis=2,pch=21,
+     bg=popfill2,bty='l')
+box(bty='l',lwd=5)
+
+legend("topright",legend=c("CAP_F","CAP_H","CAP_L","CAP_S","CAR_F","CAR_H","CAR_L","CAR_S","CUN_F","CUN_L","CUN_S"),col=c("black","black","black","black","firebrick1","firebrick1","firebrick1","firebrick1","cadetblue3","cadetblue3","cadetblue3"),
+       pch=20,cex=2,y.intersp=.5,bty='n')
+
+#Plotting both
+par(mfrow=c(1,2))
+plot(tr,"unrooted",show.tip.label=FALSE)
+tiplabels(pch=20,col=popcol2,bg="white",cex=1.2)
+plot(mds,pch=20,col=popcol2)
+legend("topleft",pch=20,cex=.8,legend=popname,col=popnamec,y.intersp=.7)
+
+```
+
+# ADMIXTURE
+
+##Running admixture on the data
+
+```{bash}
+#starting by converting vcf to bed file through plink
+#!/bin/bash -l
+
+#SBATCH -J vcftobed
+#SBATCH -e vcftobed-%j.o
+#SBATCH -o vcftobed-%j.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p high
+#SBATCH --no-requeue
+
+#programs and files
+my_plink=/home/eoziolor/program/plink/plink
+my_vcf=/home/eoziolor/guppy/data/varcall/filtered_ppicta.vcf.bgz
+my_tabix=/home/eoziolor/program/htslib/tabix
+my_out=/home/eoziolor/guppy/data/admixture/allscaf
+
+$my_plink \
+-vcf $my_vcf \
+--allow-extra-chr \
+--make-bed \
+-out $my_out
+```
+
+* Continue by removing NW from file because it messes up with total number of chromosomes allowed
+
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J remove-NC
+#SBATCH -e remove-NC-%j.o
+#SBATCH -o remove-NC-%j.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p high
+#SBATCH --no-requeue
+
+#files
+start_bim=/data/oziolore/fhet/data/admixture/allscaf/allscaf.bim
+end_bim=/data/oziolore/fhet/data/admixture/allscaf/allscaf2.bim
+
+cat $start_bim | awk '{gsub("NC_","");print}' > $end_bim
+```
+
+* running admixture for k 1-7 because we sampled 7 total populations
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J kdetermine
+#SBATCH -e kdetermine-%j.o
+#SBATCH -o kdetermine-%j.o
+#SBATCH -t 06-00:00
+#SBATCH -n 16
+#SBATCH --mem=32G
+#SBATCH -p high
+#SBATCH --no-requeue
+
+#programs
+admix=/home/eoziolor/program/admixture/admixture
+allscaf=/home/eoziolor/guppy/data/admixture/allscaf.bed
+out=/home/eoziolor/guppy/data/admixture/allscaf
+
+$admix --cv -j16 $allscaf $PBS_ARRAY_INDEX | tee $out/log${PBS_ARRAY_INDEX}.out
+
+```
+
+### Plotting admixture proportions
+
+```{r}
+ord_temp<-read.table("~/analysis/data/admixture/seqlist.txt",header=FALSE)
+ord<-unlist(ord_temp)
+
+k2<-read.table("~/analysis/data/admixture/all/allscaf.2.Q")
+k2ord<-k2[ord,]
+barplot(t(as.matrix(k2ord)),col=c("deepskyblue2","black"), ylab="Ancestry",border=NA, xaxt="n",space=0,
+        cex.lab=1.5,cex.axis=1.5)
+
+abline(b=0,v=c(0,48,96,144,168,215,264,288),col="grey",lwd=3,lty=5)
+abline(a=0,b=0,col="black",lwd=3)
+
+ax<-c(24,72,124,156,192,240,276)
+axnames<-c("SP","GB","BNP", "SJ","PB","VB","BB")
+axis(side=1,at= ax, labels = axnames,tck=-.03)
+
+gb<-k2ord[0:48,]
+gbord<-order(gb[,2],decreasing=TRUE)
+
+sp<-k2ord[49:96,]
+spord<-order(sp[,2],decreasing=TRUE)
+
+bnp<-k2ord[97:144,]
+bnpord<-order(bnp[,2],decreasing=TRUE)
+
+sj<-k2ord[145:168,]
+sjord<-order(sj[,2],decreasing=TRUE)
+
+pb<-k2ord[168:215,]
+pbord<-order(pb[,2],decreasing=TRUE)
+
+vb<-k2ord[215:264,]
+vbord<-order(vb[,2],decreasing=TRUE)
+
+bb<-k2ord[265:288,]
+bbord<-order(bb[,2],decreasing=TRUE)
+
+kall<-rbind(bb[bbord,],vb[vbord,],pb[pbord,],sj[sjord,],bnp[bnpord,],gb[gbord,],sp[spord,])
+
+kall<-na.omit(kall)
+
+par(mfrow=c(1,1),mar=c(3,3,1,1))
+barplot(t(as.matrix(kall)),col=c("cadetblue2","black"), border=NA, xaxt="n",space=0,
+        cex.lab=2,cex.axis=1.9)
+
+ax<-c(12,48,96,132,168,216,264)
+ax2<-c(0,121,122,193,194,288)
+vert<-c(24,74,122,146,194,242)
+axnames<-c("BB","VB","PB", "SJ","BNP","SP","GB")
+axcol<-c("black","firebrick2","cadetblue3")
+axis(side=1,at= ax[1:3], labels = axnames[1:3],tck=-.02,lwd=0,
+     col.axis=axcol[1],col=axcol[1],cex.axis=1.6)
+axis(side=1,at= ax[4:5], labels = axnames[4:5],tck=-.02,lwd=0,
+     col.axis=axcol[2],col=axcol[2],cex.axis=1.6)
+axis(side=1,at= ax[6:7], labels = axnames[6:7],tck=-.02,lwd=0,
+     col.axis=axcol[3],col=axcol[3],cex.axis=1.6)
+#Just the lines
+axis(side=1,at= ax2[1:2], labels=c("",""), tck=0,lwd=4,
+     col.axis=axcol[1],col=axcol[1],cex.axis=1.4)
+axis(side=1,at= ax2[3:4], labels = c("",""),tck=0,lwd=4,
+     col.axis=axcol[2],col=axcol[2],cex.axis=1.4)
+axis(side=1,at= ax2[5:6], labels = c("",""),tck=-0,lwd=4,
+     col.axis=axcol[3],col=axcol[3],cex.axis=1.4)
+abline(v=vert,col="khaki2",lty=1,lwd=2.5)
+
+########################################################
+k3<-read.table("~/analysis/data/admixture/all/allscaf.3.Q")
+k3ord<-k3[ord,]
+barplot(t(as.matrix(k3ord)),col=c("black","deepskyblue2","red"), ylab="Ancestry",border=NA, xaxt="n",space=0)
+
+abline(b=0,v=c(0,48,96,144,168,215,264,288),col="grey",lwd=3,lty=5)
+
+ax<-c(24,72,124,156,192,240,276)
+axnames<-c("SP","GB","BNP", "SJ","PB","VB","BB")
+axis(side=1,at= ax, labels = axnames,tck=-.03)
+
+##########################################################
+k4<-read.table("~/analysis/data/admixture/all/allscaf.4.Q")
+k4ord<-k4[ord,]
+
+gb<-k4ord[0:48,]
+gbord<-order(gb[,2],decreasing=TRUE)
+
+sp<-k4ord[49:96,]
+spord<-order(sp[,2],decreasing=TRUE)
+
+bnp<-k4ord[97:144,]
+bnpord<-order(bnp[,3],decreasing=TRUE)
+
+sj<-k4ord[145:168,]
+sjord<-order(sj[,3],decreasing=TRUE)
+
+pb<-k4ord[168:215,]
+pbord<-order(pb[,3],decreasing=TRUE)
+
+vb<-k4ord[215:264,]
+vbord<-order(vb[,3],decreasing=TRUE)
+
+bb<-k4ord[265:288,]
+bbord<-order(bb[,3],decreasing=TRUE)
+
+kall<-rbind(bb[bbord,],vb[vbord,],pb[pbord,],sj[sjord,],bnp[bnpord,],gb[gbord,],sp[spord,])
+
+kall<-na.omit(kall)
+barplot(t(as.matrix(kall)),col=c("red","deepskyblue2","black","darkorange"), ylab="Ancestry",border=NA, xaxt="n",space=0,
+        cex.lab=1.5,cex.axis = 1.5)
+
+ax<-c(12,48,96,132,168,216,264)
+ax2<-c(0,121,122,193,194,288)
+vert<-c(24,74,122,146,194,242)
+axnames<-c("BB","VB","PB", "SJ","BNP","SP","GB")
+axcol<-c("black","firebrick2","cadetblue3")
+axis(side=1,at= ax[1:3], labels = axnames[1:3],tck=-.02,lwd=0,
+     col.axis=axcol[1],col=axcol[1],cex.axis=1.6)
+axis(side=1,at= ax[4:5], labels = axnames[4:5],tck=-.02,lwd=0,
+     col.axis=axcol[2],col=axcol[2],cex.axis=1.6)
+axis(side=1,at= ax[6:7], labels = axnames[6:7],tck=-.02,lwd=0,
+     col.axis=axcol[3],col=axcol[3],cex.axis=1.6)
+#Just the lines
+axis(side=1,at= ax2[1:2], labels=c("",""), tck=0,lwd=4,
+     col.axis=axcol[1],col=axcol[1],cex.axis=1.4)
+axis(side=1,at= ax2[3:4], labels = c("",""),tck=0,lwd=4,
+     col.axis=axcol[2],col=axcol[2],cex.axis=1.4)
+axis(side=1,at= ax2[5:6], labels = c("",""),tck=-0,lwd=4,
+     col.axis=axcol[3],col=axcol[3],cex.axis=1.4)
+abline(v=vert,col="khaki2",lty=1,lwd=2.5)
+```
+
+# ANGSD
+
+## Lists of population samples
+
+* For angsd to run on populations, we need to create list of each population.
+
+```{bash}
+cd /home/eoziolor/guppy/data/list
+mkdir pops
+cat pops.txt | sort |  uniq > uniq.popx.txt
+
+for pop in $(cat uniq.pops.txt)
+do
+cat bam_list.txt | grep $pop > pops/$pop.txt
+done
+
+cd pops
+for i in $(ls C*); do echo $i; cat $i | wc -l; done > sample_sizes.txt
+```
+
+## High coverage applying filter
+* applying filter for high coverage sites to genome file in order to only keep normal coverage ones
+
+```{bash Creating a high coverage file excluding those SNPs}
+#Downloading data to look at how much of the genome I threw out
+mkdir ~/guppy/data/angsd
+scp -P 2022 farm:/home/eoziolor/guppy/data/depth/hicov.bed ~/guppy/data/angsd/
+```
+
+## Looking at size of excluded high coverage regions
+```{r}
+hi<-read.table("~/guppy/data/angsd/hicov.bed",header=FALSE)
+sum(hi[,4])
+
+#Threw out 14Mb of data => 1.6% of the genome
+```
+
+## Creating a keepsites file 
+* with all bases that have below 200x coverage
+
+```{bash Create the keepsites file and export to computer}
+#[cluster]
+#!/bin/bash -l
+
+#SBATCH -J keepsites
+#SBATCH -e keepsites-%j.o
+#SBATCH -o keepsites-%j.o
+#SBATCH -N 1
+#SBATCH -n 8
+#SBATCH -t 03-00:00
+#SBATCH --mem=60000
+#SBATCH -p high
+
+module load bio3
+source ~/.bashrc
+
+my_cov=/home/eoziolor/guppy/data/depth/coverage_allbases.txt.gz
+my_out=/home/eoziolor/guppy/data/angsd/keepsites.bed
+
+zcat $my_cov | \
+awk '{OFS="\t"}{s=$2-1}{print $1,s,$2,$3}' | \
+awk '{OFS="\t"}{if($4<1500){print}}' | \
+bedtools merge -i - -d 10 > $my_out
+```
+
+* Converting those to a .file format for ANGSD to deal with
+```{bash}
+cat /home/eoziolor/guppy/data/angsd/keepsites.bed | \
+awk '{OFS="\t"}{s=$2+1}{print $1,s,$3}' > /home/eoziolor/guppy/data/angsd/keepsites.file
+```
+
+* Downloading the .bed file to make a script with 50Mb randomly selected to create expectation for SFS
+```{bash}
+scp -P 2022 farm:/home/eoziolor/guppy/data/angsd/keepsites.bed ~/guppy/data/angsd/
+```
+
+* Script to pick up 50Mb at random from the keepsites file in order to run SAF and SFS on those for bayesian priors
+
+```{r Selecting random 50Mb from it}
+
+orig<-read.table("~/guppy/data/angsd/keepsites.bed", header=F) #reading in the keepsites file
+
+p<-(orig[,3]-orig[,2])/(sum(orig[,3]-orig[,2])) #creating probability vector so that I don't oversample large chunks
+
+p<-unlist(p) #unlisting the vector
+
+z<-p<0 #removing any negative probabilities for 0 values
+p<-p[!z] #applying that to vector
+
+v<-sample(x=length(p),size=2650,prob=p) #sampling 2650 chunks with probability to get out ~50Mb of the genome
+v<-sort(v)
+sum(orig[v,3]-orig[v,2]) #checking the total size of bases
+
+write.table(orig[v,], file="~/guppy/data/angsd/keep50Mb.bed",row.names=FALSE,col.names=FALSE,quote=FALSE, sep='\t')
+```
+
+* putting that data back into [cluster]
+
+```{bash Copy those selections from computer}
+scp -P 2022 ~/guppy/data/angsd/keep50Mb.bed farm:/home/eoziolor/guppy/data/angsd/
+```
+
+* Converting that to a .file
+
+```{bash Convert from bed to file}
+cat /home/eoziolor/guppy/data/angsd/keep50Mb.bed | \
+awk '{OFS="\t"}{s=$2+1}{print $1,s,$3}' > /home/eoziolor/guppy/data/angsd/keep50Mb.file 
+
+cat /home/eoziolor/guppy/data/angsd/keepsites.bed | \
+awk '{OFS="\t"}{s=$2+1}{print $1,s,$3}' > /home/eoziolor/guppy/data/angsd/keepsites.file
+```
+
+* indexing all of those files with ANGSD
+
+```{bash Index keepsites}
+/home/eoziolor/program/angsd/angsd sites index /home/eoziolor/guppy/data/angsd/keepsites.file
+/home/eoziolor/program/angsd/angsd sites index /home/eoziolor/guppy/data/angsd/keep50Mb.file
+```
+
+## SAF (Site Allele Frequency) estimate
+* Starting site allele frequency estimation on a 50Mb subsample for each population (to create SFS)
+
+```{bash Running Site Allele Frequency estimations on the 50Mb chunk}
+#!/bin/bash -l
+
+#SBATCH -J saf_50mb
+#SBATCH --array=1-11
+#SBATCH -e saf_50mb%A-%a.o
+#SBATCH -o saf_50mb%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+pops=CAP_F\ CAP_H\ CAP_L\ CAP_S\ CAR_F\ CAR_H\ CAR_L\ CAR_S\ CUN_F\ CUN_L\ CUN_S
+
+one=$(echo $pops | cut -f $SLURM_ARRAY_TASK_ID -d ' ')
+
+#files
+list=/home/eoziolor/guppy/data/list/pops/$one\.txt
+genome=/home/eoziolor/guppy/data/genome/preticulata.fna
+keep=/home/eoziolor/guppy/data/angsd/keep50Mb.file
+outfile=/home/eoziolor/guppy/data/angsd/$one\_small
+my_angsd=/home/eoziolor/program/angsd/angsd
+
+$my_angsd \
+-bam $list \
+-doSaf 1 \
+-fold 1 \
+-anc $genome \
+-GL 2 \
+-minMapQ 30 \
+-minQ 20 \
+-minind 10 \
+-sites $keep \
+-out $outfile
+```
+
+## SFS (Site Frequency Spectra) 
+* Using the subsampled .saf to create site frequency spectra
+
+```{bash Running Site Frequency Statistic on the 50Mb chunk}
+#!/bin/bash -l
+
+#SBATCH -J sfs
+#SBATCH --array=1-11
+#SBATCH -e sfs%A-%a.o
+#SBATCH -o sfs%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+pops=CAP_F\ CAP_H\ CAP_L\ CAP_S\ CAR_F\ CAR_H\ CAR_L\ CAR_S\ CUN_F\ CUN_L\ CUN_S
+
+one=$(echo $pops | cut -f $SLURM_ARRAY_TASK_ID -d ' ')
+
+
+#program and file
+my_sfs=/home/eoziolor/program/angsd/misc/realSFS
+in_saf=/home/eoziolor/guppy/data/angsd/$one\_small.saf.idx
+outdir=/home/eoziolor/guppy/data/angsd
+out_sfs=$one\.sfs
+
+#code
+
+$my_sfs $in_saf -maxIter 100 -P 8 -nSites 50000000 > $outdir/$out_sfs
+```
+
+### SFS download for R
+* Once saf and sfs are created, take sfs to R to look at distribution
+
+```{bash Copy SFS to computer to plot}
+scp -P 2022 farm:/home/eoziolor/guppy/data/angsd/*.sfs ~/guppy/data/angsd/
+```
+
+### Plot SFS in R
+* starting with folded spectra of subsample (24 per population)
+
+```{r Plot subsampled SFS}
+sf<-list.files("~/guppy/data/angsd/","*.sfs",full.names=TRUE)
+cols<-c(rep("black",4),rep("red",4),rep("blue",4))
+pop<-list("CAP_F","CAP_H","CAP_L","CAP_S","CAR_F","CAR_H","CAR_L","CAR_S","CUN_F","CUN_L","CUN_S")
+#pop<-list("CAP_F","CAP_H","CAP_S","CAR_F","CUN_F","CUN_S")
+
+for(i in 1:11){
+  pop[[i]]<-scan(sf[[i]])
+}
+
+par(mfrow=c(3,4),mar=c(2,2,2,2))
+for(i in 1:11){
+  plot(log(pop[[i]]),col="black",pch=20,lwd=3)
+}
+```
+
+## Thetas per site
+
+* new script
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J thetas
+#SBATCH --array=1-11
+#SBATCH -e thetas%A-%a.o
+#SBATCH -o thetas%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+pops=CAP_F\ CAP_H\ CAP_L\ CAP_S\ CAR_F\ CAR_H\ CAR_L\ CAR_S\ CUN_F\ CUN_L\ CUN_S
+
+one=$(echo $pops | cut -f $SLURM_ARRAY_TASK_ID -d ' ')
+
+#files
+list=/home/eoziolor/guppy/data/list/pops/$one\.txt
+genome=/home/eoziolor/guppy/data/genome/preticulata.fna
+keep=/home/eoziolor/guppy/data/angsd/keepsites.file
+outfile=/home/eoziolor/guppy/data/angsd/$one\_theta
+my_angsd=/home/eoziolor/program/angsd/angsd
+my_sfs=/home/eoziolor/guppy/data/angsd/$one\.sfs
+
+#Code
+$my_angsd \
+-bam $list \
+-out $outfile \
+-doThetas 1 \
+-fold 1 \
+-doSaf 1 \
+-pest  $my_sfs \
+-anc $genome \
+-sites $keep \
+-minMapQ 30 \
+-minQ 20 \
+-minind 10 \
+-GL 2
+```
+
+### Converting readable thetas.gz
+* Reading thetas.gz file to a readable state: below is command for folded estimate of subsample
+
+```{bash Making the thetas estimates into a readable file}
+#!/bin/bash -l
+
+#SBATCH -J convert_thetas
+#SBATCH --array=1-11
+#SBATCH -e convert_thetas%A-%a.o
+#SBATCH -o convert_thetas%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+pops=CAP_F\ CAP_H\ CAP_L\ CAP_S\ CAR_F\ CAR_H\ CAR_L\ CAR_S\ CUN_F\ CUN_L\ CUN_S
+
+one=$(echo $pops | cut -f $SLURM_ARRAY_TASK_ID -d ' ')
+
+
+#program/file
+my_stat=/home/eoziolor/program/angsd/misc/thetaStat
+file=/home/eoziolor/guppy/data/angsd/$one\.theta.thetas.idx
+out=/home/eoziolor/guppy/data/angsd/$one\_readable_theta.gz
+
+$my_stat print $file | gzip > $out
+```
+
+### Breaking them into sliding windows
+
+```{bash Sliding windows}
+#!/bin/bash -l
+
+#SBATCH -J window_thetas
+#SBATCH --array=1-11
+#SBATCH -e window_thetas%A-%a.o
+#SBATCH -o window_thetas%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+pops=CAP_F\ CAP_H\ CAP_L\ CAP_S\ CAR_F\ CAR_H\ CAR_L\ CAR_S\ CUN_F\ CUN_L\ CUN_S
+
+one=$(echo $pops | cut -f $SLURM_ARRAY_TASK_ID -d ' ')
+
+#programs and files
+
+my_bedtools=/home/eoziolor/program/bedtools2/bin/bedtools
+thetas=/home/eoziolor/guppy/data/angsd/theta/$one\_readable_theta.gz
+window=/home/eoziolor/guppy/data/window/50kb.10kb.bed
+my_genome=/home/eoziolor/guppy/data/genome/preticulata.fna.fai
+outdir=/home/eoziolor/guppy/data/angsd/theta          
+outfile=$one\_neut_1kb.bed
+
+zcat $thetas | \
+egrep -v "^#" | \
+awk '{OFS="\t"}{w=exp($3)}{pi=exp($4)}{s=$2-1}{print $1,s,$2,w,pi}' | \
+$my_bedtools map \
+-a $window \
+-b stdin \
+-g <(cut -f 1-2 $my_genome) \
+-c 4,4,5,5 \
+-o sum,count,sum,count > $outdir/$outfile
+```
+
+## Plotting distribution of neutral estimates 
+
+
+```{bash}
+scp -P 2022 farm:/home/eoziolor/guppy/data/angsd/*50kb* ~/guppy/data/angsd/
+```
+
+## Tajima's D
+* Break the file into pi, theta and and calculate tajima's D, starting with 50kb windows for speed
+
+```{r Calculating Taj D; subsetting pi and theta}
+### Loading pi(column6), theta(column4), and counts(columns 5,7)
+
+CAP_F<-read.table("~/guppy/data/angsd/CAP_F_neut_50kb.bed",stringsAsFactors=FALSE) #reading in all files
+CAP_H<-read.table("~/guppy/data/angsd/CAP_H_neut_50kb.bed",stringsAsFactors=FALSE)
+CAP_L<-read.table("~/guppy/data/angsd/CAP_L_neut_50kb.bed",stringsAsFactors=FALSE)
+CAP_S<-read.table("~/guppy/data/angsd/CAP_S_neut_50kb.bed",stringsAsFactors=FALSE)
+CAR_F<-read.table("~/guppy/data/angsd/CAR_F_neut_50kb.bed",stringsAsFactors=FALSE)
+CAR_H<-read.table("~/guppy/data/angsd/CAR_H_neut_50kb.bed",stringsAsFactors=FALSE)
+CAR_L<-read.table("~/guppy/data/angsd/CAR_L_neut_50kb.bed",stringsAsFactors=FALSE)
+CAR_S<-read.table("~/guppy/data/angsd/CAR_S_neut_50kb.bed",stringsAsFactors=FALSE)
+CUN_F<-read.table("~/guppy/data/angsd/CUN_F_neut_50kb.bed",stringsAsFactors=FALSE)
+CUN_L<-read.table("~/guppy/data/angsd/CUN_L_neut_50kb.bed",stringsAsFactors=FALSE)
+CUN_S<-read.table("~/guppy/data/angsd/CUN_S_neut_50kb.bed",stringsAsFactors=FALSE)
+
+colnam<-c("scaf","Start","End","Theta","Tcount","Pi","Pcount") #giving them column names
+colnames(CAP_F)<-colnam
+colnames(CAP_H)<-colnam
+colnames(CAP_L)<-colnam
+colnames(CAP_S)<-colnam
+colnames(CAR_F)<-colnam
+colnames(CAR_H)<-colnam
+colnames(CAR_L)<-colnam
+colnames(CAR_S)<-colnam
+colnames(CUN_F)<-colnam
+colnames(CUN_L)<-colnam
+colnames(CUN_S)<-colnam
+
+pops<-list(CAP_F,CAP_H,CAP_L,CAP_S,CAR_F,CAR_H,CAR_L,CAR_S,CUN_F,CUN_L,CUN_S)
+popnames<-c("CAP_F","CAP_H","CAP_L","CAP_S","CAR_F","CAR_H","CAR_L","CAR_S","CUN_F","CUN_L","CUN_S")
+names(pops)<-popnames
+
+for(i in popnames){ #reading in the files as.numeric
+  for(j in 4:7){
+    pops[[i]][,j]<-as.numeric(pops[[i]][,j])
+  }
+}
+
+cov<-cbind(CAR_F[1:3],CAP_F[,7],CAP_H[,7],CAP_L[,7],CAP_S[,7],CAR_F[,7],CAR_H[,7],
+           CAR_L[,7],CAR_S[,7],CUN_F[,7],CUN_L[,7],CUN_S[,7]) #creating a vector of coverage of each statistic call
+
+nsnps<-cov[,4] #creating a vector that sums all calls over each SNP
+for (i in 5:14){
+  nsnps <- nsnps + cov[,i]
+}
+nsnps <- nsnps/11 #dividing by number of populations and only using sites that have at least 20 SNPS used over the window per population
+
+subw <- nsnps > 1000 #filter to be saved for these windows
+
+
+#calculating mean and median pi----
+pimean<-c() #calculating mean
+for(i in popnames){
+  pimean[i]<-sum(pops[[i]][subw,6],na.rm=TRUE)/sum(pops[[i]][subw,7],na.rm=TRUE)
+}
+
+#converting these to per base estimates
+popbase<-list()
+
+for(i in popnames){ #calculating per base estimates rather than averaged estimates over the windows we have
+  popbase[[i]]<-cbind(pops[[i]][,1:3],pops[[i]][,4]/pops[[i]][,5],pops[[i]][,6]/pops[[i]][,7])
+}
+
+names<-c("scaf", "start","end",'theta/b',"pi/b")
+
+for(i in popnames){ #giving the new list column names
+  colnames(popbase[[i]])<-names
+}
+
+wt<-matrix(nrow=length(popbase[[1]][,1]),ncol=length(popnames)) #making a matrix of Waterson's theta values
+for(i in 1:11){
+  wt[,i]<-popbase[[i]][,4]
+}
+colnames(wt)<-popnames
+
+pi<-matrix(nrow=length(popbase[[1]][,1]),ncol=length(popnames)) #making a matrix of pi values
+for(i in 1:11){
+  pi[,i]<-popbase[[i]][,5]
+}
+colnames(pi)<-popnames
+
+
+source("~/fgfh_post/scripts/angsd/tajimas.r")
+
+taj<-list()
+
+popsize<-c(16,32,51,23,28,26,32,28,38,44,32)
+
+for(i in popnames){ #calculating tajima's D for all populations through a function in r; takes forever
+  print(i)
+  for(j in 1:dim(pi)[[1]]){
+    taj[[i]]<-c(taj[[i]],tajimas(pi[j,i],wt[j,i],popsize[match(i,popnames)]))
+  }
+}
+
+
+###
+
+taj<-cbind(popbase[[1]][,1:3],taj[["CAP_F"]],taj[["CAP_H"]],taj[["CAP_L"]],taj[["CAP_S"]],taj[["CAR_F"]],taj[["CAR_H"]],taj[["CAR_L"]],taj[["CAR_S"]],taj[["CUN_F"]],taj[["CUN_L"]],taj[["CUN_S"]]) #binding into a dataframe
+
+taj<-cbind(taj,keep=as.numeric(subw)) #keeping the filter of low representation bases
+
+tajname<-c("scaf","start","end","CAP_F","CAP_H","CAP_L","CAP_S","CAR_F","CAR_H","CAR_L","CAR_S","CUN_F","CUN_L","CUN_S","keep") #column names
+colnames(taj)<-tajname
+
+write.csv(taj,file="~/guppy/data/angsd/taj",quote=FALSE,row.names=FALSE) #writing tajima's d
+
+theta<-cbind(popbase[["CAP_F"]][1:3],wt,keep=as.numeric(subw))
+
+thetname<-c("scaf","start","end","CAP_F","CAP_H","CAP_L","CAP_S","CAR_F","CAR_H","CAR_L","CAR_S","CUN_F","CUN_L","CUN_S","keep")
+colnames(theta)<-thetname
+
+write.csv(theta,file="~/guppy/data/angsd/thetas",quote=FALSE,row.names=FALSE)
+
+
+pi<-cbind(popbase[["CAP_F"]][1:3],pi,keep=as.numeric(subw))
+
+piname<-c("scaf","start","end","CAP_F","CAP_H","CAP_L","CAP_S","CAR_F","CAR_H","CAR_L","CAR_S","CUN_F","CUN_L","CUN_S","keep")
+colnames(pi)<-piname
+write.csv(pi,file="~/guppy/data/angsd/pi",quote=FALSE,row.names=FALSE)
+
+write.csv(cov,file="~/guppy/data/angsd/cov",quote=FALSE,row.names = FALSE)
+
+```
+
+## Plotting pi and Taj's D
+
+```{r Plotting subsampled data}
+library('tidyr')
+library('tibble')
+library('magrittr')
+library('dplyr')
+library('gridExtra')
+
+#loading neutrality stats----
+
+theta<-read.table("~/guppy/data/angsd/thetas",header=TRUE, sep=',') #reading in summary statistics
+pi<-read.table("~/guppy/data/angsd/pi", header=TRUE, sep=',')
+taj<-read.table("~/guppy/data/angsd/taj",header=TRUE, sep=',')
+
+subw<-pi[,"keep"]>0 #applying filter of low coverage
+
+##ggplot pi----
+library(ggplot2)
+library(reshape2)
+
+mpi<-melt(pi[subw,1:14],id=c("scaf","start","end"))
+
+jpeg(filename="~/guppy/data/angsd/pi.jpg",width=1000,height=600)
+ggplot(mpi,
+       aes(x=variable,y=value,fill=variable,color=variable))+
+  geom_violin(trim=FALSE,draw_quantiles = 0.5,lwd=2)+
+  scale_fill_manual(values=c("black","grey30","grey60","grey90","firebrick4","firebrick2","lightpink3", "lightpink1","cadetblue3","cadetblue1","cyan"))+
+  scale_color_manual(values=c("grey40",rep("black",10)))+
+  scale_y_continuous(limits=c(0.001,.04))+
+  theme_classic()+
+  labs(y="",x="")+
+  theme(axis.line.y=element_line(color="black",size=5),axis.line=element_line(color="black",size=5))+
+  theme(axis.text.y=element_text(color="black",size=40))+
+  theme(axis.text.x=element_text(color="black",size=20,angle=90))
+dev.off()
+
+mtaj<-melt(taj[subw,1:14],id=c("scaf","start","end"))
+
+jpeg(filename="~/guppy/data/angsd/taj.jpg",width=1000,height=600)
+ggplot(mtaj,
+       aes(x=variable,y=value,fill=variable,color=variable))+
+  geom_violin(trim=FALSE,draw_quantiles = 0.5,lwd=2)+
+  scale_fill_manual(values=c("black","grey30","grey60","grey90","firebrick4","firebrick2","lightpink3", "lightpink1","cadetblue3","cadetblue1","cyan"))+
+  scale_color_manual(values=c("grey40",rep("black",10)))+
+  scale_y_continuous(limits=c(-.5,.5))+
+  theme_classic()+
+  labs(y="",x="")+
+  theme(axis.line.y=element_line(color="black",size=5),axis.line=element_line(color="black",size=5))+
+  theme(axis.text.y=element_text(color="black",size=40))+
+  theme(axis.text.x=element_text(color="black",size=20,angle=90))
+dev.off()
+
+```
+
+## TO BE DONE: Fst with ANGSD
+
+### TO BE DONE: SAF full genome 
+* Creating site allele frequencies for full genome of each population
+
+```{bash Full SAF/Not necessary step}
+#!/bin/bash -l
+
+#SBATCH -J saf_full
+#SBATCH --array=1-11
+#SBATCH -e saf_full%A-%a.o
+#SBATCH -o saf_full%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+
+pops=CAP_F\ CAP_H\ CAP_L\ CAP_S\ CAR_F\ CAR_H\ CAR_L\ CAR_S\ CUN_F\ CUN_L\ CUN_S
+
+one=$(echo $pops | cut -f $SLURM_ARRAY_TASK_ID -d ' ')
+
+#files
+list=/home/eoziolor/guppy/data/list/pops/$one\.txt
+genome=/home/eoziolor/guppy/data/genome/preticulata.fna
+keep=/home/eoziolor/guppy/data/angsd/keepsites.file
+outfile=/home/eoziolor/guppy/data/angsd/$one\_big
+my_angsd=/home/eoziolor/program/angsd/angsd
+
+$my_angsd \
+-bam $list \
+-doSaf 1 \
+-fold 1 \
+-anc $genome \
+-GL 2 \
+-minMapQ 30 \
+-minQ 20 \
+-minind 10 \
+-sites $keep \
+-out $outfile
+```
+
+### TO BE DONE: Making 2D SFS
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J 2dsfs
+#SBATCH --array=1-55
+#SBATCH -e 2dsfs%A-%a.o
+#SBATCH -o 2dsfs%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+pops=CAP_F\ CAP_H\ CAP_L\ CAP_S\ CAR_F\ CAR_H\ CAR_L\ CAR_S\ CUN_F\ CUN_L\ CUN_S
+
+pair=$(for i in {1..10}
+do
+	ii=$(expr $i + 1)
+	for j in $(seq $ii 11)
+	do echo $pops | cut -f $i,$j -d ' '
+  done
+done | \
+sed -n "$(echo $SLURM_ARRAY_TASK_ID)p")
+
+echo $SLURM_ARRAY_TASK_ID
+
+pop1=$(echo $pair | cut -f 1 -d ' ')
+pop2=$(echo $pair | cut -f 2 -d ' ')
+
+#program
+my_angsd=/home/eoziolor/program/angsd/misc/realSFS 
+
+#files
+my_dir=/home/eoziolor/guppy/data/angsd
+
+$my_angsd $my_dir/$pop1.saf.idx $my_dir/$pop2.saf.idx > $my_dir/$pop1\.$pop2\.ml
+
+```
+
+### TO BE DONE: Indexing for Fst analysis
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J fst_index
+#SBATCH --array=1-55
+#SBATCH -e fst_index%A-%a.o
+#SBATCH -o fst_index%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+pops=CAP_F\ CAP_H\ CAP_L\ CAP_S\ CAR_F\ CAR_H\ CAR_L\ CAR_S\ CUN_F\ CUN_L\ CUN_S
+
+pair=$(for i in {1..10}
+do
+	ii=$(expr $i + 1)
+	for j in $(seq $ii 11)
+	do echo $pops | cut -f $i,$j -d ' '
+  done
+done | \
+sed -n "$(echo $SLURM_ARRAY_TASK_ID)p")
+
+echo $SLURM_ARRAY_TASK_ID
+
+pop1=$(echo $pair | cut -f 1 -d ' ')
+pop2=$(echo $pair | cut -f 2 -d ' ')
+
+#program
+my_angsd=/home/eoziolor/program/angsd/misc/realSFS 
+
+#files
+my_dir=/home/eoziolor/guppy/data/angsd
+
+$my_angsd fst index $my_dir/$pop1\.saf.idx $my_dir/$pop2\.saf.idx \
+-sfs $my_dir/$pop1\.$pop2\.ml -fstout $my_dir/fst/
+```
+
+### TO BE DONE: Genome-wide angsd fst
+
+```{basdh}
+#!/bin/bash -l
+
+#SBATCH -J fst_index
+#SBATCH --array=1-55
+#SBATCH -e fst_index%A-%a.o
+#SBATCH -o fst_index%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+pops=CAP_F\ CAP_H\ CAP_L\ CAP_S\ CAR_F\ CAR_H\ CAR_L\ CAR_S\ CUN_F\ CUN_L\ CUN_S
+
+pair=$(for i in {1..10}
+do
+	ii=$(expr $i + 1)
+	for j in $(seq $ii 11)
+	do echo $pops | cut -f $i,$j -d ' '
+  done
+done | \
+sed -n "$(echo $SLURM_ARRAY_TASK_ID)p")
+
+echo $SLURM_ARRAY_TASK_ID
+
+pop1=$(echo $pair | cut -f 1 -d ' ')
+pop2=$(echo $pair | cut -f 2 -d ' ')
+
+#program
+my_angsd=/home/eoziolor/program/angsd/misc/realSFS 
+
+#files
+my_dir=/home/eoziolor/guppy/data/angsd
+
+$my_angsd fst stats $my_dir/fst/$pop1.$pop2.fst.idx 
+```
+
+### TO BE DONE: Windowed Fst ANGSD
+
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J fst_index
+#SBATCH --array=1-55
+#SBATCH -e fst_index%A-%a.o
+#SBATCH -o fst_index%A-%a.o
+#SBATCH -t 06-00:00
+#SBATCH -n 8
+#SBATCH --mem=16G
+#SBATCH -p med
+#SBATCH --no-requeue
+
+pops=CAP_F\ CAP_H\ CAP_L\ CAP_S\ CAR_F\ CAR_H\ CAR_L\ CAR_S\ CUN_F\ CUN_L\ CUN_S
+
+pair=$(for i in {1..10}
+do
+	ii=$(expr $i + 1)
+	for j in $(seq $ii 11)
+	do echo $pops | cut -f $i,$j -d ' '
+  done
+done | \
+sed -n "$(echo $SLURM_ARRAY_TASK_ID)p")
+
+echo $SLURM_ARRAY_TASK_ID
+
+pop1=$(echo $pair | cut -f 1 -d ' ')
+pop2=$(echo $pair | cut -f 2 -d ' ')
+
+#program
+my_angsd=/home/eoziolor/program/angsd/misc/realSFS 
+
+#files
+my_dir=/home/eoziolor/guppy/data/angsd
+
+$my_angsd fst stats2 $pop1.$pop2.fst.idx -win 50000 -step 10000 > $my_dir/$pop1.pop2.50kb10kb.fst
+```
+
+### Plots
+
+```{bash}
+scp farm:/home/eoziolor/guppy/data/angsd/theta/*50kb* /home/elias/analysis/data/angsd/subsample/
+
+```
+
+# Creating necessary files
+## Genome file
+
+```{bash}
+awk -v OFS='\t' {'print $1,$2'} preticulata.fna.fai > preticulata.fna.genome
+```
+
+## Windows file
+```{bash}
+#!/bin/bash -l
+
+#SBATCH -J windows
+#SBATCH -e windows-%j.o
+#SBATCH -o windows-%j.o
+#SBATCH -N 1
+#SBATCH -n 8
+#SBATCH -t 06-00:00
+#SBATCH --mem=16000
+#SBATCH -p high
+#SBATCH --no-requeue
+
+my_btools=/home/eoziolor/program/bedtools2/bin/bedtools
+my_ref=/home/eoziolor/guppy/data/genome/preticulata.fna.genome
+my_out=/home/eoziolor/guppy/data/window/50kb.10kb.bed
+
+$my_btools makewindows \
+-g $my_ref \
+-w 50000 \
+-s 10000 > $my_out
+```
